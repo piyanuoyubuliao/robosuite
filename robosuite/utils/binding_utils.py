@@ -4,6 +4,7 @@ Useful classes for supporting DeepMind MuJoCo binding.
 
 import gc
 import os
+import warnings
 from tempfile import TemporaryDirectory
 
 # DIRTY HACK copied from mujoco-py - a global lock on rendering
@@ -171,7 +172,16 @@ class MjRenderContext:
         rgb_img = np.empty((height, width, 3), dtype=np.uint8)
         depth_img = np.empty((height, width), dtype=np.float32) if depth else None
 
+        render_error = mujoco.mjr_getError()
+        while render_error:
+            if render_error == 0x0506:
+                raise RuntimeError(f"Offscreen rendering failed with OpenGL error 0x{render_error:04x}")
+            warnings.warn(f"OpenGL error 0x{render_error:04x} before pixel readback", RuntimeWarning)
+            render_error = mujoco.mjr_getError()
         mujoco.mjr_readPixels(rgb=rgb_img, depth=depth_img, viewport=viewport, con=self.con)
+        render_error = mujoco.mjr_getError()
+        if render_error:
+            raise RuntimeError(f"Offscreen rendering failed with OpenGL error 0x{render_error:04x}")
 
         ret_img = rgb_img
         if segmentation:
@@ -199,18 +209,20 @@ class MjRenderContext:
 
     def __del__(self):
         # free mujoco rendering context and GL rendering context
-        self.con.free()
+        gl_context = getattr(self, "gl_ctx", None)
+        if gl_context is None:
+            return
         try:
-            self.gl_ctx.free()
-        except Exception:
-            # avoid getting OpenGL.error.GLError
-            pass
-        del self.con
-        del self.gl_ctx
-        del self.scn
-        del self.cam
-        del self.vopt
-        del self.pert
+            gl_context.make_current()
+            render_context = getattr(self, "con", None)
+            if render_context is not None:
+                render_context.free()
+        finally:
+            try:
+                gl_context.free()
+            except Exception:
+                # avoid getting OpenGL.error.GLError
+                pass
 
 
 class MjRenderContextOffscreen(MjRenderContext):
